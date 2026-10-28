@@ -1,0 +1,14 @@
+{
+  "name": "lower-tower-telegram-bot",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Bot Telegram d'administration de LOWER TOWER (utilise les mêmes fonctions serveur que le site)",
+  "scripts": { "start": "node src/index.js" },
+  "engines": { "node": ">=18" },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.45.0",
+    "dotenv": "^16.4.5",
+    "grammy": "^1.30.0"
+  }
+}
