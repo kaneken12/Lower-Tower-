@@ -315,4 +315,33 @@ function askShopConfirm(ctx, f) {
 }
 
 // ---------- alertes administratives (notifications du compte lié) ----------
-async function pollAlerts() 
+async function pollAlerts() {
+  for (const [tgId, s] of sessions) {
+    try {
+      const file = path.join(DATA_DIR, `sent-${tgId}.json`);
+      const sent = new Set(fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, 'utf8')) : []);
+      const { data, error } = await s.sb.from('notifications').select('id,type,title,message,created_at').eq('user_id', s.userId).eq('read', false).in('type', ALERT_TYPES).order('created_at').limit(20);
+      if (error) throw new Error(error.message);
+      for (const n of data) {
+        if (sent.has(n.id)) continue;
+        await bot.api.sendMessage(tgId, `🔔 <b>${esc(n.title)}</b>\n${esc(n.message)}`, html);
+        sent.add(n.id);
+      }
+      fs.writeFileSync(file, JSON.stringify([...sent].slice(-500)));
+    } catch (e) { console.error(`[alertes ${tgId}]`, e.message); }
+  }
+}
+
+bot.catch(async (err) => {
+  console.error('[erreur]', err.error?.message || err.message);
+  try { await err.ctx.reply(`⚠️ ${err.error?.message || 'Opération impossible.'}`); } catch { /* ignore */ }
+});
+
+// ---------- démarrage ----------
+for (const entry of ADMINS) {
+  try { await login(entry); console.log(`Administrateur Telegram ${entry.telegram_id} connecté.`); } catch (e) { console.error(e.message); }
+}
+if (!sessions.size) { console.error('Aucun administrateur connecté : vérifie ADMINS_JSON.'); process.exit(1); }
+setInterval(pollAlerts, POLL_MS);
+process.on('SIGINT', () => process.exit(0));
+bot.start({ onStart: (me) => console.log(`Bot @${me.username} démarré.`) });
