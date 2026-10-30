@@ -7,7 +7,10 @@ exactement ceux du site. Une modification faite sur Telegram est visible immédi
 
 ## Ce qu'il sait faire
 - `/stats` : statistiques générales.
-- `/joueur [texte]` : rechercher un joueur ; fiche, historique, créditer / débiter (avec motif et confirmation), suspendre / réactiver.
+- `/joueur [texte]` : rechercher un joueur (nom, pseudo ou numéro) ; fiche, historique, créditer / débiter (avec motif et confirmation), suspendre / réactiver.
+- **✏️ Modifier** (depuis la fiche d'un joueur) : nom, pseudo, classe, niveau (1 à 9999), avec motif obligatoire, confirmation et inscription au journal d'audit.
+- **🔑 Mot de passe** : génère un mot de passe temporaire (12 caractères) et coupe les sessions ouvertes du joueur. Il s'affiche une seule fois puis le message est supprimé après 90 secondes. Un mot de passe existant ne peut **jamais** être relu (il est stocké sous forme chiffrée) : on peut seulement en générer un nouveau.
+  Le mot de passe du compte OWNER ne se réinitialise pas ici ; celui d'un ADMIN ne peut l'être que par l'OWNER.
 - `/prets` : demandes Ask Loan en attente (approuver / refuser, avec confirmation) ; `/retards` : dettes en retard.
 - `/events` : lister, publier, dépublier, annuler, créer un évent.
 - `/boutique` : lister les articles, créer un article (photo possible).
