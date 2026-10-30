@@ -108,7 +108,8 @@ async function showPlayer(ctx, id) {
   const kb = new InlineKeyboard()
     .text('📜 Fiche', `sh:${id}`).text('🧾 Historique', `hi:${id}`).row()
     .text('➕ Créditer', `bal:credit:${id}`).text('➖ Débiter', `bal:debit:${id}`).row()
-    .text(p.status === 'active' ? '⛔ Suspendre' : '✅ Réactiver', `st:${p.status === 'active' ? 'suspended' : 'active'}:${id}`);
+    .text(p.status === 'active' ? '⛔ Suspendre' : '✅ Réactiver', `st:${p.status === 'active' ? 'suspended' : 'active'}:${id}`).row()
+    .text('✏️ Modifier', `ed:${id}`).text('🔑 Mot de passe', `pw:${id}`);
   await ctx.reply(
     `<b>${esc(p.display_name)}</b> (${esc(p.pseudo)})\nClasse : ${esc(p.class)} — Niveau ${p.level}\nStatut : ${p.status}\n` +
     `Abyss Coins : ${fmt(p.ac)} — Gems : ${fmt(p.gem)}\nRôles : ${esc((p.roles || []).join(', '))}\nTéléphone : ${esc(p.phone)}`, { ...html, reply_markup: kb });
@@ -152,6 +153,43 @@ bot.callbackQuery(/^st:(active|suspended):(.+)$/, async (ctx) => {
   await ctx.answerCallbackQuery();
   setFlow(ctx.from.id, { type: 'status', step: 'reason', data: { status: ctx.match[1], uid: ctx.match[2] } });
   await ctx.reply('Motif (obligatoire) ?');
+});
+
+// ---------- données officielles d'un joueur (nom, pseudo, classe, niveau) ----------
+const CLASSES = ['Swimer', 'Silent', 'Dante', 'Stamer', 'Bolter'];
+const FIELD_LABEL = { name: 'le nom', pseudo: 'le pseudo', class: 'la classe', level: 'le niveau' };
+bot.callbackQuery(/^ed:(.+)$/, async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const id = ctx.match[1];
+  await ctx.reply('Que veux-tu modifier ?', { reply_markup: new InlineKeyboard()
+    .text('Nom', `edf:name:${id}`).text('Pseudo', `edf:pseudo:${id}`).row()
+    .text('Classe', `edf:class:${id}`).text('Niveau', `edf:level:${id}`) });
+});
+bot.callbackQuery(/^edf:(name|pseudo|class|level):(.+)$/, async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const [, field, uid] = ctx.match;
+  if (field === 'class') {
+    setFlow(ctx.from.id, { type: 'edit', step: 'class', data: { field, uid } });
+    const kb = new InlineKeyboard();
+    CLASSES.forEach((c, i) => { kb.text(c, `edc:${c}`); if (i % 2) kb.row(); });
+    return ctx.reply('Nouvelle classe ?', { reply_markup: kb });
+  }
+  setFlow(ctx.from.id, { type: 'edit', step: 'value', data: { field, uid } });
+  await ctx.reply(`Nouvelle valeur pour ${FIELD_LABEL[field]} ?`);
+});
+bot.callbackQuery(/^edc:(Swimer|Silent|Dante|Stamer|Bolter)$/, async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const f = getFlow(ctx.from.id);
+  if (!f || f.type !== 'edit') return ctx.reply('Session expirée, recommence.');
+  f.data.value = ctx.match[1]; f.step = 'reason'; setFlow(ctx.from.id, f);
+  await ctx.reply('Motif (obligatoire) ?');
+});
+
+// ---------- mot de passe oublié : le serveur génère un mot de passe temporaire (les mots de passe existants ne sont jamais lisibles) ----------
+bot.callbackQuery(/^pw:(.+)$/, async (ctx) => {
+  await ctx.answerCallbackQuery();
+  setFlow(ctx.from.id, { type: 'pw', step: 'reason', data: { uid: ctx.match[1] } });
+  await ctx.reply('Réinitialiser le mot de passe de ce joueur. Motif (obligatoire) ?');
 });
 
 // ---------- prêts (Ask Loan) ----------
@@ -256,6 +294,26 @@ bot.callbackQuery(/^cf:(.+)$/, async (ctx) => {
     await rpc(sb, 'admin_create_shop_item', { _name: f.data.name, _description: f.data.desc, _image_path: imagePath, _price: f.data.price, _currency: f.data.currency });
     return ctx.editMessageText('✅ Article créé dans la Guilde marchande.');
   }
+  if (key === 'ed' && f.type === 'edit') {
+    const d = f.data;
+    await rpc(sb, 'admin_update_player', {
+      _user_id: d.uid,
+      _display_name: d.field === 'name' ? d.value : null,
+      _pseudo: d.field === 'pseudo' ? d.value : null,
+      _class: d.field === 'class' ? d.value : null,
+      _level: d.field === 'level' ? d.value : null,
+      _reason: d.reason,
+    });
+    await ctx.editMessageText('✅ Donnée mise à jour et inscrite au journal d\'audit.');
+    return showPlayer(ctx, d.uid);
+  }
+  if (key === 'pw' && f.type === 'pw') {
+    const pw = await rpc(sb, 'admin_reset_password', { _user_id: f.data.uid, _reason: f.data.reason, _confirm: true });
+    await ctx.editMessageText('✅ Mot de passe réinitialisé : ses sessions ouvertes ont été coupées.');
+    const m = await ctx.reply(`🔑 Mot de passe temporaire :\n<code>${esc(pw)}</code>\n⚠️ Transmets-le au joueur. Ce message sera supprimé dans 90 secondes et le mot de passe ne sera plus affiché.`, html);
+    setTimeout(() => ctx.api.deleteMessage(m.chat.id, m.message_id).catch(() => {}), 90000);
+    return;
+  }
   return ctx.reply('Confirmation inattendue.');
 });
 
@@ -284,6 +342,26 @@ bot.on('message:text', async (ctx) => {
     if (t.length < 3) return ctx.reply('Motif trop court.');
     f.data.reason = t; setFlow(ctx.from.id, f);
     return ctx.reply(`<b>Confirmer ?</b>\n${f.data.status === 'suspended' ? 'Suspendre' : 'Réactiver'} ce compte.\nMotif : ${esc(t)}`, { ...html, reply_markup: confirmKb('st') });
+  }
+  if (f.type === 'edit') {
+    if (f.step === 'value') {
+      const fld = f.data.field;
+      if (fld === 'level') { const n = Number(t); if (!Number.isInteger(n) || n < 1 || n > 9999) return ctx.reply('Niveau invalide : un entier de 1 à 9999.'); f.data.value = n; }
+      else if (fld === 'name') { if (t.length < 1 || t.length > 60) return ctx.reply('Nom invalide (1 à 60 caractères).'); f.data.value = t; }
+      else if (fld === 'pseudo') { if (t.length < 2 || t.length > 40) return ctx.reply('Pseudo invalide (2 à 40 caractères).'); f.data.value = t; }
+      f.step = 'reason'; setFlow(ctx.from.id, f);
+      return ctx.reply('Motif (obligatoire) ?');
+    }
+    if (f.step === 'reason') {
+      if (t.length < 3) return ctx.reply('Motif trop court.');
+      f.data.reason = t; setFlow(ctx.from.id, f);
+      return ctx.reply(`<b>Confirmer ?</b>\nModifier ${FIELD_LABEL[f.data.field]} : <b>${esc(f.data.value)}</b>\nMotif : ${esc(t)}`, { ...html, reply_markup: confirmKb('ed') });
+    }
+  }
+  if (f.type === 'pw' && f.step === 'reason') {
+    if (t.length < 3) return ctx.reply('Motif trop court.');
+    f.data.reason = t; setFlow(ctx.from.id, f);
+    return ctx.reply(`<b>Confirmer ?</b>\nGénérer un nouveau mot de passe temporaire pour ce joueur (l'ancien ne fonctionnera plus).\nMotif : ${esc(t)}`, { ...html, reply_markup: confirmKb('pw') });
   }
   if (f.type === 'ev_new') {
     if (f.step === 'title') { f.data.title = t.slice(0, 120); f.step = 'date'; setFlow(ctx.from.id, f); return ctx.reply('Date et heure (heure du Cameroun) au format JJ/MM/AAAA HH:MM ?'); }
