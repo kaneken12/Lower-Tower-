@@ -1,9 +1,7 @@
-// LOWER TOWER — bot Telegram d'administration (v1.1)
+// LOWER TOWER — bot Telegram d'administration
 // Principe : le bot n'a AUCUNE règle métier. Chaque administrateur autorisé est relié à SON compte du site.
 // Le bot s'y connecte avec la clé publique (jamais de clé secrète) et appelle les mêmes fonctions serveur que le site :
-// permissions, confirmations, journaux d'audit et règles financières restent ceux du site.
-//
-// v1.1 : FEATURES_JSON — le bot s'adapte à l'avancement du site (phase 1 → 5).
+// les permissions, confirmations, journaux d'audit et règles financières sont donc exactement les mêmes.
 import 'dotenv/config';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -15,23 +13,15 @@ if (!TELEGRAM_BOT_TOKEN || !SUPABASE_URL || !SUPABASE_PUBLISHABLE_KEY) {
   console.error('Variables manquantes : TELEGRAM_BOT_TOKEN, SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY (voir .env.example).');
   process.exit(1);
 }
-
 let ADMINS = [];
 try { ADMINS = JSON.parse(process.env.ADMINS_JSON || '[]'); } catch { console.error('ADMINS_JSON invalide.'); process.exit(1); }
-
-// ---------- calage sur l'avancement du site ----------
-// Phase 1 : "stats","joueur" | 2 : "audit" | 3 : "prets" | 4 : "events","boutique" | 5 : "owner"
-let FEATURES = ['stats', 'joueur'];
-try { FEATURES = JSON.parse(process.env.FEATURES_JSON || '["stats","joueur"]'); } catch { console.warn('FEATURES_JSON invalide, valeur par défaut.'); }
-const has = (f) => FEATURES.includes(f);
-
 const ALERT_TYPES = (process.env.ALERT_TYPES || 'bank_loan_request,chat_report,shop_sale').split(',').map((s) => s.trim()).filter(Boolean);
 const POLL_MS = 20000;
 const DATA_DIR = path.resolve('data');
 fs.mkdirSync(DATA_DIR, { recursive: true });
 
 const bot = new Bot(TELEGRAM_BOT_TOKEN);
-const sessions = new Map(); // telegram_id -> { sb, userId, role, permissions }
+const sessions = new Map(); // telegram_id -> { sb, userId, label }
 const flows = new Map();    // telegram_id -> { type, step, data, ts }
 const lastCmd = new Map();
 
@@ -44,31 +34,13 @@ const chunks = (t, n = 3500) => { const out = []; for (let i = 0; i < t.length; 
 const setFlow = (id, f) => flows.set(id, { ...f, ts: Date.now() });
 const getFlow = (id) => { const f = flows.get(id); if (f && Date.now() - f.ts > 600000) { flows.delete(id); return null; } return f || null; };
 const html = { parse_mode: 'HTML' };
-const S = (ctx) => sessions.get(ctx.from.id);
 
 async function rpc(sb, name, args = {}) {
   const { data, error } = await sb.rpc(name, args);
   if (error) throw new Error(error.message);
   return data;
 }
-
-// RPC protégé : message propre si la fonction n'existe pas encore côté site
-async function safeRpc(ctx, name, args = {}, feature = null) {
-  if (feature && !has(feature)) {
-    await ctx.reply("⚠️ Fonctionnalité pas encore active : le site n'a pas atteint cette phase.");
-    return null;
-  }
-  try {
-    return await rpc(S(ctx).sb, name, args);
-  } catch (e) {
-    if (/could not find the function|404|PGRST202/i.test(e.message)) {
-      console.warn(`[fonction absente] ${name}`);
-      await ctx.reply("⚠️ La fonction serveur n'existe pas encore sur le site (phase en construction).");
-      return null;
-    }
-    throw e;
-  }
-}
+const S = (ctx) => sessions.get(ctx.from.id);
 
 // ---------- connexion des administrateurs ----------
 async function login(entry) {
@@ -80,7 +52,6 @@ async function login(entry) {
   const p = Array.isArray(perms) ? perms[0] : perms;
   if (!p || p.role === 'player') throw new Error(`le compte lié à ${entry.telegram_id} n'est ni OWNER ni ADMIN`);
   sessions.set(Number(entry.telegram_id), { sb, userId: data.user.id, role: p.role, permissions: p.permissions || [] });
-  console.log(`[ok] ${entry.telegram_id} connecté (${p.role})`);
 }
 
 // ---------- contrôle d'accès ----------
@@ -100,372 +71,355 @@ bot.use(async (ctx, next) => {
 });
 
 // ---------- menus ----------
-const mainMenu = () => {
-  const kb = new InlineKeyboard();
-  if (has('stats')) kb.text('📊 Statistiques', 'm:stats');
-  if (has('joueur')) kb.text('🔎 Joueur', 'm:player');
-  kb.row();
-  if (has('prets')) kb.text('🏦 Prêts', 'm:loans');
-  if (has('events')) kb.text('📅 Évents', 'm:events');
-  if (has('boutique')) kb.text('🛒 Boutique', 'm:shop');
-  kb.row();
-  if (has('audit')) kb.text('📜 Audit', 'm:audit');
-  if (has('owner')) kb.text('👑 OWNER', 'm:owner');
-  return kb;
-};
-const confirmKb = () => new InlineKeyboard().text('✅ Confirmer', 'cf').text('✖️ Annuler', 'no');
-const backKb = () => new InlineKeyboard().text('◀️ Menu', 'menu');
+const mainMenu = () => new InlineKeyboard()
+  .text('📊 Statistiques', 'm:stats').text('🔎 Joueur', 'm:player').row()
+  .text('🏦 Prêts', 'm:loans').text('📅 Évents', 'm:events').row()
+  .text('🛒 Boutique', 'm:shop');
+const confirmKb = (key) => new InlineKeyboard().text('✅ Confirmer', `cf:${key}`).text('✖️ Annuler', 'no');
 
-bot.command(['start', 'aide', 'help', 'menu'], (ctx) => ctx.reply('LOWER TOWER — administration. Que veux-tu faire ?', { ...html, reply_markup: mainMenu() }));
+bot.command(['start', 'aide', 'help', 'menu'], (ctx) => ctx.reply('LOWER TOWER — administration. Que veux-tu faire ?', { reply_markup: mainMenu() }));
 bot.command('annuler', (ctx) => { flows.delete(ctx.from.id); return ctx.reply('Opération annulée.'); });
-bot.callbackQuery('menu', async (ctx) => { flows.delete(ctx.from.id); await ctx.answerCallbackQuery(); await ctx.editMessageText('LOWER TOWER — administration. Que veux-tu faire ?', { ...html, reply_markup: mainMenu() }); });
 bot.callbackQuery('no', async (ctx) => { flows.delete(ctx.from.id); await ctx.answerCallbackQuery(); await ctx.editMessageText('Opération annulée.'); });
 
-// ---------- confirmation générique ----------
-function askConfirm(ctx, label, rpcName, args, feature = null) {
-  setFlow(ctx.from.id, { type: 'exec', data: { label, rpcName, args, feature } });
-  ctx.reply(`⚠️ <b>Confirmer ?</b>\n\n${label}\n\nCette action sera inscrite au journal d'audit.`, { ...html, reply_markup: confirmKb() });
-}
-bot.callbackQuery('cf', async (ctx) => {
-  const f = getFlow(ctx.from.id);
-  if (!f || f.type !== 'exec') return ctx.answerCallbackQuery({ text: 'Rien à confirmer (expiré ?).' });
-  await ctx.answerCallbackQuery('En cours…');
-  const { label, rpcName, args, feature } = f.data;
-  try {
-    const res = await safeRpc(ctx, rpcName, args, feature);
-    flows.delete(ctx.from.id);
-    const extra = res ? `\n<code>${esc(typeof res === 'object' ? JSON.stringify(res) : String(res)).slice(0, 300)}</code>` : '';
-    await ctx.editMessageText(`✅ Fait : ${label}${extra}`, html);
-  } catch (e) {
-    await ctx.editMessageText(`❌ Erreur : ${esc(e.message)}`, html);
-  }
-});
-
-// ---------- statistiques (phase 1) ----------
+// ---------- statistiques ----------
 async function showStats(ctx) {
-  const j = await safeRpc(ctx, 'admin_stats', {}, 'stats');
-  if (!j) return;
-  const s = Array.isArray(j) ? j[0] : j;
+  const j = await rpc(S(ctx).sb, 'admin_stats');
   await ctx.reply(
-    `<b>Statistiques</b>\nJoueurs : ${s.players_active} actifs / ${s.players_total} (en ligne : ${s.online_now})\n` +
-    `Comptes : ${s.individual_accounts} individuels, ${s.union_accounts} unions\n` +
-    `Abyss Coins en circulation : ${fmt(s.ac_total)}\nGems en circulation : ${fmt(s.gem_total)}\n` +
-    `Prêts en cours : ${s.loans_active} (en retard : ${s.loans_overdue})\nDemandes Ask Loan en attente : ${s.bank_loan_requests_pending}\n` +
-    `Boutique : ${s.shop_available} disponibles, ${s.shop_sold} vendus\nÉvents à venir : ${s.events_upcoming}\nSignalements ouverts : ${s.chat_reports_open}`, html);
+    `<b>Statistiques</b>\nJoueurs : ${j.players_active} actifs / ${j.players_total} (en ligne : ${j.online_now})\n` +
+    `Comptes : ${j.individual_accounts} individuels, ${j.union_accounts} unions\n` +
+    `Abyss Coins en circulation : ${fmt(j.ac_total)}\nGems en circulation : ${fmt(j.gem_total)}\n` +
+    `Prêts en cours : ${j.loans_active} (en retard : ${j.loans_overdue})\nDemandes Ask Loan en attente : ${j.bank_loan_requests_pending}\n` +
+    `Boutique : ${j.shop_available} disponibles, ${j.shop_sold} vendus\nÉvents à venir : ${j.events_upcoming}\nSignalements ouverts : ${j.chat_reports_open}`, html);
 }
 bot.command('stats', showStats);
-bot.callbackQuery('m:stats', async (ctx) => { await ctx.answerCallbackQuery(); await showStats(ctx); });
 
-// ---------- joueurs (phase 1) ----------
+// ---------- joueurs ----------
 async function searchPlayers(ctx, text) {
-  const rows = await safeRpc(ctx, 'admin_list_players', { _search: text, _status: null, _limit: 8, _offset: 0 }, 'joueur');
-  if (!rows) return;
+  const rows = await rpc(S(ctx).sb, 'admin_list_players', { _search: text, _status: null, _limit: 8, _offset: 0 });
   if (!rows.length) return ctx.reply('Aucun joueur trouvé.');
   const kb = new InlineKeyboard();
-  rows.forEach((p) => kb.text(`${p.pseudo} (${p.display_name})${p.status !== 'active' ? ' ⛔' : ''}`, `p:${p.id}`).row());
-  kb.text('◀️ Menu', 'menu');
-  await ctx.reply(`${rows.length} joueur(s) trouvé(s) :`, { ...html, reply_markup: kb });
+  rows.forEach((p) => kb.text(`${p.pseudo} (${p.display_name}) — ${p.status === 'active' ? p.class : '⛔'}`.slice(0, 60), `pl:${p.id}`).row());
+  await ctx.reply('Résultats :', { reply_markup: kb });
 }
-bot.command('joueur', (ctx) => {
-  const t = ctx.message.text.replace(/^\/joueur\s*/i, '').trim();
-  if (!t) { setFlow(ctx.from.id, { type: 'search', data: {} }); return ctx.reply('Envoie le nom, le pseudo ou le numéro du joueur.'); }
-  return searchPlayers(ctx, t);
-});
-bot.callbackQuery('m:player', async (ctx) => { await ctx.answerCallbackQuery(); setFlow(ctx.from.id, { type: 'search', data: {} }); await ctx.reply('Envoie le nom, le pseudo ou le numéro du joueur.'); });
-
 async function showPlayer(ctx, id) {
-  const res = await safeRpc(ctx, 'admin_player_details', { _id: id }, 'joueur');
-  if (!res) return;
-  const p = Array.isArray(res) ? res[0] : res;
-  setFlow(ctx.from.id, { type: 'player', data: { id } });
+  const rows = await rpc(S(ctx).sb, 'admin_list_players', { _search: null, _status: null, _limit: 200, _offset: 0 });
+  const p = rows.find((r) => r.id === id);
+  if (!p) return ctx.reply('Joueur introuvable.');
   const kb = new InlineKeyboard()
-    .text('💰 Créditer', `pc:${id}`).text('💸 Débiter', `pd:${id}`).row()
-    .text('✏️ Modifier', `pm:${id}`).text('📜 Historique', `ph:${id}`).row()
-    .text(p.status === 'active' ? '⛔ Suspendre' : '✅ Réactiver', `ps:${id}`)
-    .text('🔑 Mot de passe', `pr:${id}`).row()
-    .text('◀️ Menu', 'menu');
+    .text('📜 Fiche', `sh:${id}`).text('🧾 Historique', `hi:${id}`).row()
+    .text('➕ Créditer', `bal:credit:${id}`).text('➖ Débiter', `bal:debit:${id}`).row()
+    .text(p.status === 'active' ? '⛔ Suspendre' : '✅ Réactiver', `st:${p.status === 'active' ? 'suspended' : 'active'}:${id}`).row()
+    .text('✏️ Modifier', `ed:${id}`).text('🔑 Mot de passe', `pw:${id}`);
   await ctx.reply(
-    `<b>${esc(p.pseudo)}</b> (${esc(p.display_name)})\n` +
-    `Statut : ${p.status === 'active' ? 'actif' : 'suspens'} · Niveau : ${p.level ?? '?'} · Classe : ${esc(p.class_name ?? '?')}\n` +
-    `Solde : ${fmt(p.ac_balance ?? 0)} AC · ${fmt(p.gem_balance ?? 0)} Gems\n` +
-    `Numéro : ${esc(p.phone ?? '—')}`, { ...html, reply_markup: kb });
+    `<b>${esc(p.display_name)}</b> (${esc(p.pseudo)})\nClasse : ${esc(p.class)} — Niveau ${p.level}\nStatut : ${p.status}\n` +
+    `Abyss Coins : ${fmt(p.ac)} — Gems : ${fmt(p.gem)}\nRôles : ${esc((p.roles || []).join(', '))}\nTéléphone : ${esc(p.phone)}`, { ...html, reply_markup: kb });
 }
-bot.callbackQuery(/^p:(.+)$/, async (ctx) => { await ctx.answerCallbackQuery(); await showPlayer(ctx, ctx.match[1]); });
+bot.command('joueur', async (ctx) => {
+  const q = ctx.match?.trim();
+  if (q) return searchPlayers(ctx, q);
+  setFlow(ctx.from.id, { type: 'search' });
+  return ctx.reply('Nom, pseudo ou numéro à rechercher ?');
+});
+bot.callbackQuery(/^pl:(.+)$/, async (ctx) => { await ctx.answerCallbackQuery(); await showPlayer(ctx, ctx.match[1]); });
+bot.callbackQuery(/^sh:(.+)$/, async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const rows = await rpc(S(ctx).sb, 'get_sheet', { _user_id: ctx.match[1] });
+  const r = Array.isArray(rows) ? rows[0] : rows;
+  if (!r) return ctx.reply('Aucune fiche enregistrée.');
+  for (const c of chunks(r.rendered_text || '(fiche vide)')) await ctx.reply(`<pre>${esc(c)}</pre>`, html);
+});
+bot.callbackQuery(/^hi:(.+)$/, async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const rows = await rpc(S(ctx).sb, 'admin_player_ledger', { _user_id: ctx.match[1], _before: null, _limit: 12 });
+  if (!rows.length) return ctx.reply('Aucune opération.');
+  await ctx.reply(rows.map((r) => `${dt(r.created_at)} · ${esc(r.type)} · ${r.delta > 0 ? '+' : ''}${fmt(r.delta)} ${cur(r.currency)} → ${fmt(r.balance_after)}${r.scope === 'union' ? ' (compte commun)' : ''}`).join('\n'));
+});
 
-// crédit / débit : choix devise → montant → motif → confirmation
-function startAdjust(ctx, id, direction) {
-  setFlow(ctx.from.id, { type: 'adjust', step: 'currency', data: { id, direction } });
-  ctx.reply('Quelle devise ?', { ...html, reply_markup: new InlineKeyboard().text('Abyss Coins (AC)', 'cur:AC').text('Gems', 'cur:GEM').row().text('✖️ Annuler', 'no') });
-}
-bot.callbackQuery('pc:(\\d+)', (ctx) => { ctx.answerCallbackQuery(); startAdjust(ctx, ctx.match[1], 'credit'); });
-bot.callbackQuery('pd:(\\d+)', (ctx) => { ctx.answerCallbackQuery(); startAdjust(ctx, ctx.match[1], 'debit'); });
+// ---------- ajustement de solde (confirmation obligatoire) ----------
+bot.callbackQuery(/^bal:(credit|debit):(.+)$/, async (ctx) => {
+  await ctx.answerCallbackQuery();
+  setFlow(ctx.from.id, { type: 'bal', step: 'currency', data: { dir: ctx.match[1], uid: ctx.match[2] } });
+  await ctx.reply('Quelle monnaie ?', { reply_markup: new InlineKeyboard().text('Abyss Coins', 'cur:AC').text('Gems', 'cur:GEM') });
+});
 bot.callbackQuery(/^cur:(AC|GEM)$/, async (ctx) => {
-  const f = getFlow(ctx.from.id);
-  if (!f || f.type !== 'adjust') return ctx.answerCallbackQuery({ text: 'Opération expirée.' });
-  f.data.currency = ctx.match[1]; f.step = 'amount'; setFlow(ctx.from.id, f);
   await ctx.answerCallbackQuery();
-  await ctx.reply(`Montant à ${f.data.direction === 'credit' ? 'créditer' : 'débiter'} en ${cur(f.data.currency)} ?`);
+  const f = getFlow(ctx.from.id);
+  if (!f) return ctx.reply('Session expirée, recommence.');
+  f.data.currency = ctx.match[1];
+  if (f.type === 'bal') { f.step = 'amount'; setFlow(ctx.from.id, f); return ctx.reply('Montant (nombre entier) ?'); }
+  if (f.type === 'shop_new') { f.step = 'photo'; setFlow(ctx.from.id, f); return ctx.reply('Envoie la photo de l\'article, ou « - » pour aucune photo.'); }
+});
+bot.callbackQuery(/^st:(active|suspended):(.+)$/, async (ctx) => {
+  await ctx.answerCallbackQuery();
+  setFlow(ctx.from.id, { type: 'status', step: 'reason', data: { status: ctx.match[1], uid: ctx.match[2] } });
+  await ctx.reply('Motif (obligatoire) ?');
 });
 
-// modifier un joueur
-bot.callbackQuery('pm:(\\d+)', async (ctx) => {
+// ---------- données officielles d'un joueur (nom, pseudo, classe, niveau) ----------
+const CLASSES = ['Swimer', 'Silent', 'Dante', 'Stamer', 'Bolter'];
+const FIELD_LABEL = { name: 'le nom', pseudo: 'le pseudo', class: 'la classe', level: 'le niveau' };
+bot.callbackQuery(/^ed:(.+)$/, async (ctx) => {
   await ctx.answerCallbackQuery();
   const id = ctx.match[1];
-  setFlow(ctx.from.id, { type: 'modif', step: 'field', data: { id } });
-  await ctx.reply('Quel champ modifier ?', { ...html, reply_markup: new InlineKeyboard()
-    .text('Nom', 'mf:name').text('Pseudo', 'mf:pseudo').row()
-    .text('Classe', 'mf:class_name').text('Niveau (1-9999)', 'mf:level').row()
-    .text('✖️ Annuler', 'no') });
+  await ctx.reply('Que veux-tu modifier ?', { reply_markup: new InlineKeyboard()
+    .text('Nom', `edf:name:${id}`).text('Pseudo', `edf:pseudo:${id}`).row()
+    .text('Classe', `edf:class:${id}`).text('Niveau', `edf:level:${id}`) });
 });
-bot.callbackQuery(/^mf:(\w+)$/, async (ctx) => {
-  const f = getFlow(ctx.from.id);
-  if (!f || f.type !== 'modif') return ctx.answerCallbackQuery({ text: 'Opération expirée.' });
-  f.data.field = ctx.match[1]; f.step = 'value'; setFlow(ctx.from.id, f);
+bot.callbackQuery(/^edf:(name|pseudo|class|level):(.+)$/, async (ctx) => {
   await ctx.answerCallbackQuery();
-  await ctx.reply(`Nouvelle valeur pour « ${f.data.field} » ?`);
+  const [, field, uid] = ctx.match;
+  if (field === 'class') {
+    setFlow(ctx.from.id, { type: 'edit', step: 'class', data: { field, uid } });
+    const kb = new InlineKeyboard();
+    CLASSES.forEach((c, i) => { kb.text(c, `edc:${c}`); if (i % 2) kb.row(); });
+    return ctx.reply('Nouvelle classe ?', { reply_markup: kb });
+  }
+  setFlow(ctx.from.id, { type: 'edit', step: 'value', data: { field, uid } });
+  await ctx.reply(`Nouvelle valeur pour ${FIELD_LABEL[field]} ?`);
 });
-
-// suspendre / réactiver
-bot.callbackQuery('ps:(\\d+)', async (ctx) => {
+bot.callbackQuery(/^edc:(Swimer|Silent|Dante|Stamer|Bolter)$/, async (ctx) => {
   await ctx.answerCallbackQuery();
   const f = getFlow(ctx.from.id);
-  const id = ctx.match[1];
-  const res = await safeRpc(ctx, 'admin_player_details', { _id: id }, 'joueur');
-  const p = Array.isArray(res) ? res[0] : res;
-  const newStatus = p?.status === 'active' ? 'suspended' : 'active';
-  setFlow(ctx.from.id, { type: 'motif', data: { label: `${newStatus === 'active' ? 'Réactiver' : 'Suspendre'} le joueur #${id}`, rpcName: 'admin_set_player_status', args: { _id: id, _status: newStatus } } });
-  await ctx.reply('Motif (obligatoire, inscrit au journal d\u2019audit) ?');
+  if (!f || f.type !== 'edit') return ctx.reply('Session expirée, recommence.');
+  f.data.value = ctx.match[1]; f.step = 'reason'; setFlow(ctx.from.id, f);
+  await ctx.reply('Motif (obligatoire) ?');
 });
 
-// mot de passe temporaire
-bot.callbackQuery('pr:(\\d+)', async (ctx) => {
+// ---------- mot de passe oublié : le serveur génère un mot de passe temporaire (les mots de passe existants ne sont jamais lisibles) ----------
+bot.callbackQuery(/^pw:(.+)$/, async (ctx) => {
   await ctx.answerCallbackQuery();
-  const id = ctx.match[1];
-  askConfirm(ctx, `🔑 Générer un mot de passe temporaire pour le joueur #${id} (ses sessions seront coupées).`, 'admin_reset_password', { _id: id }, 'joueur');
+  setFlow(ctx.from.id, { type: 'pw', step: 'reason', data: { uid: ctx.match[1] } });
+  await ctx.reply('Réinitialiser le mot de passe de ce joueur. Motif (obligatoire) ?');
 });
 
-// historique
-bot.callbackQuery('ph:(\\d+)', async (ctx) => {
-  await ctx.answerCallbackQuery();
-  const rows = await safeRpc(ctx, 'admin_player_history', { _id: ctx.match[1], _limit: 15 }, 'joueur');
-  if (!rows?.length) return ctx.reply('Aucun historique.');
-  const txt = rows.map((r) => `• <b>${esc(r.action)}</b> — ${fmt(r.amount ?? '')} ${r.currency ? cur(r.currency) : ''} · ${dt(r.created_at)}${r.motif ? `\n  ${esc(r.motif)}` : ''}`).join('\n');
-  for (const c of chunks(`<b>📜 Historique (15 dernières entrées)</b>\n\n${txt}`)) await ctx.reply(c, html);
-});
-
-// ---------- saisies texte (étapes de flux) ----------
-bot.on('message:text', async (ctx) => {
-  if (ctx.message.text.startsWith('/')) return;
-  const f = getFlow(ctx.from.id);
-  if (!f) return;
-  const t = ctx.message.text.trim();
-  const d = f.data;
-
-if (f.type === 'search') { flows.delete(ctx.from.id); return searchPlayers(ctx, t); }
-
-if (f.type === 'adjust' && f.step === 'amount') {
-    const n = Number(t.replace(/[^\d.-]/g, ''));
-    if (!Number.isFinite(n) || n <= 0) return ctx.reply('Montant invalide. Réessaie :');
-    d.amount = n; f.step = 'motif'; f.data = d; setFlow(ctx.from.id, f);
-    return ctx.reply('Motif (obligatoire, inscrit au journal d\u2019audit) ?');
-  }
-
-if (f.type === 'modif' && f.step === 'value') {
-    if (d.field === 'level') {
-      const n = Number(t);
-      if (!Number.isInteger(n) || n < 1 || n > 9999) return ctx.reply('Niveau invalide (1 à 9999). Réessaie :');
-      d.value = n;
-    } else { d.value = t; }
-    f.step = 'motif'; f.data = d; setFlow(ctx.from.id, f);
-    return ctx.reply('Motif (obligatoire, inscrit au journal d\u2019audit) ?');
-  }
-
-if (f.type === 'motif') {
-    d.args = { ...(d.args || {}), _motif: t };
-    flows.delete(ctx.from.id);
-    return askConfirm(ctx, `${d.label} — motif : ${esc(t)}`, d.rpcName, d.args, d.feature || null);
-  }
-
-if (f.type === 'motif:adjust') {
-    flows.delete(ctx.from.id);
-    const rpcName = d.direction === 'credit' ? 'admin_credit_player' : 'admin_debit_player';
-    return askConfirm(ctx, `${d.direction === 'credit' ? 'Créditer' : 'Débiter'} ${fmt(d.amount)} ${cur(d.currency)} au joueur #${d.id} — motif : ${esc(t)}`,
-      rpcName, { _id: d.id, _amount: d.amount, _currency: d.currency, _motif: t }, 'joueur');
-  }
-
-if (f.type === 'motif:modif') {
-    flows.delete(ctx.from.id);
-    return askConfirm(ctx, `Modifier « ${d.field} » du joueur #${d.id} → « ${esc(d.value)} » — motif : ${esc(t)}`,
-      'admin_update_player_field', { _id: d.id, _field: d.field, _value: d.value, _motif: t }, 'joueur');
-  }
-});
-// aiguillage des flux vers leurs étapes « motif » finales
-bot.use(async (ctx, next) => {
-  if (!ctx.message?.text) return next();
-  const f = getFlow(ctx.from.id);
-  if (!f) return next();
-  if (f.type === 'adjust' && f.step === 'motif') { f.type = 'motif:adjust'; setFlow(ctx.from.id, f); return; } // géré au prochain message
-  if (f.type === 'modif' && f.step === 'motif') { f.type = 'motif:modif'; setFlow(ctx.from.id, f); return; }
-  return next();
-});
-
-// ---------- journal d'audit (phase 1/2) ----------
-async function showAudit(ctx, offset = 0) {
-  const rows = await safeRpc(ctx, 'admin_audit_log', { _limit: 20, _offset: offset }, 'audit');
-  if (!rows?.length) return ctx.reply(offset ? 'Plus rien.' : 'Journal vide.');
-  const txt = rows.map((r) =>
-    `• <b>${esc(r.action)}</b> — ${esc(r.actor_label ?? '')} · ${dt(r.created_at)}${r.details ? `\n  ${esc(r.details)}` : ''}`
-  ).join('\n');
-  const kb = new InlineKeyboard().text('⬇️ Suite', `audit:${offset + 20}`).text('◀️ Menu', 'menu');
-  for (const c of chunks(`<b>📜 Journal d'audit ${offset ? '(suite)' : '— 20 dernières entrées'}</b>\n\n${txt}`)) {
-    await ctx.reply(c, { ...html, reply_markup: kb });
+// ---------- prêts (Ask Loan) ----------
+async function showLoans(ctx) {
+  const rows = await rpc(S(ctx).sb, 'admin_list_loans', { _status: 'pending', _kind: 'bank' });
+  if (!rows.length) return ctx.reply('Aucune demande Ask Loan en attente.');
+  for (const l of rows.slice(0, 10)) {
+    const kb = new InlineKeyboard().text('✅ Approuver', `ln:a:${l.id}`).text('❌ Refuser', `ln:r:${l.id}`);
+    await ctx.reply(`<b>${esc(l.borrower_pseudo)}</b> demande ${fmt(l.principal)} ${cur(l.currency)}\nÉchéance : ${dt(l.due_at)}\nPlafond actuel : ${fmt(l.ceiling)} ${cur(l.currency)}`, { ...html, reply_markup: kb });
   }
 }
-bot.command('audit', (ctx) => showAudit(ctx, 0));
-bot.callbackQuery('m:audit', async (ctx) => { await ctx.answerCallbackQuery(); await showAudit(ctx, 0); });
-bot.callbackQuery(/^audit:(\d+)$/, async (ctx) => { await ctx.answerCallbackQuery(); await showAudit(ctx, Number(ctx.match[1])); });
-
-// ---------- prêts (phase 3) ----------
-async function showLoans(ctx, status) {
-  const rows = await safeRpc(ctx, 'admin_list_loans', { _status: status, _limit: 10 }, 'prets');
-  if (!rows?.length) return ctx.reply(status === 'pending' ? 'Aucune demande Ask Loan en attente.' : 'Aucun retard.');
-  const kb = new InlineKeyboard();
-  rows.forEach((l) => {
-    kb.text(`${fmt(l.amount)} AC — ${esc(l.pseudo ?? l.player_id)} (${dt(l.created_at)})`, `loan:${l.id}`).row();
-  });
-  kb.text('◀️ Menu', 'menu');
-  await ctx.reply(`<b>${status === 'pending' ? '🏦 Demandes Ask Loan' : '⏰ Dettes en retard'}</b>`, { ...html, reply_markup: kb });
-}
-bot.command('prets', (ctx) => showLoans(ctx, 'pending'));
-bot.command('retards', (ctx) => showLoans(ctx, 'overdue'));
-bot.callbackQuery('m:loans', async (ctx) => { await ctx.answerCallbackQuery(); await showLoans(ctx, 'pending'); });
-bot.callbackQuery(/^loan:(.+)$/, async (ctx) => {
-  const id = ctx.match[1];
-  const kb = new InlineKeyboard().text('✅ Approuver', `la:ok:${id}`).text('❌ Refuser', `la:no:${id}`).row().text('✖️ Annuler', 'no');
-  await ctx.answerCallbackQuery();
-  await ctx.reply('Que faire de cette demande ?', { ...html, reply_markup: kb });
+bot.command('prets', showLoans);
+bot.command('retards', async (ctx) => {
+  const rows = await rpc(S(ctx).sb, 'admin_list_loans', { _status: 'active', _kind: null });
+  const late = rows.filter((l) => new Date(l.due_at) <= new Date());
+  await ctx.reply(late.length ? late.slice(0, 20).map((l) => `${esc(l.borrower_pseudo)} doit ${fmt(l.remaining)} ${cur(l.currency)} (échu le ${dt(l.due_at)})`).join('\n') : 'Aucune dette en retard.');
 });
-bot.callbackQuery(/^la:(ok|no):(.+)$/, async (ctx) => {
+bot.callbackQuery(/^ln:(a|r):(.+)$/, async (ctx) => {
   await ctx.answerCallbackQuery();
-  const [verdict, id] = [ctx.match[1], ctx.match[2]];
-  askConfirm(ctx, `${verdict === 'ok' ? 'Approuver' : 'Refuser'} la demande Ask Loan #${id}`,
-    verdict === 'ok' ? 'admin_approve_bank_loan' : 'admin_refuse_bank_loan', { _id: id }, 'prets');
+  const approve = ctx.match[1] === 'a';
+  await ctx.reply(approve ? 'Confirmer l\'approbation ? La monnaie sera créée sur le compte du joueur.' : 'Confirmer le refus ?',
+    { reply_markup: new InlineKeyboard().text('✅ Oui', `lc:${ctx.match[1]}:${ctx.match[2]}`).text('✖️ Non', 'no') });
+});
+bot.callbackQuery(/^lc:(a|r):(.+)$/, async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const res = await rpc(S(ctx).sb, 'approve_bank_loan', { _loan_id: ctx.match[2], _approve: ctx.match[1] === 'a' });
+  await ctx.editMessageText(res === 'active' ? '✅ Prêt accordé.' : '❌ Prêt refusé.');
 });
 
-// ---------- évents (phase 4) ----------
+// ---------- évents ----------
 async function showEvents(ctx) {
-  const rows = await safeRpc(ctx, 'admin_list_events', { _limit: 10 }, 'events');
-  if (!rows?.length) return ctx.reply('Aucun évent.');
-  const kb = new InlineKeyboard();
-  rows.forEach((e) => kb.text(`${e.is_published ? '🟢' : '⚪️'} ${esc(e.title)} (${dt(e.date)})`, `ev:${e.id}`).row());
-  kb.text('➕ Créer un évent', 'ev:new').text('◀️ Menu', 'menu');
-  await ctx.reply('<b>📅 Évents</b>', { ...html, reply_markup: kb });
+  const rows = await rpc(S(ctx).sb, 'admin_events_list');
+  if (!rows.length) await ctx.reply('Aucun évent.');
+  for (const e of rows.slice(0, 8)) {
+    const kb = new InlineKeyboard();
+    if (e.status !== 'published') kb.text('📣 Publier', `ev:published:${e.id}`);
+    if (e.status === 'published') kb.text('📥 Dépublier', `ev:draft:${e.id}`);
+    if (e.status !== 'cancelled') kb.text('🚫 Annuler', `ev:cancelled:${e.id}`);
+    await ctx.reply(`<b>${esc(e.title)}</b> [${e.status}]\n${dt(e.starts_at)}${e.location ? ' — ' + esc(e.location) : ''}`, { ...html, reply_markup: kb });
+  }
+  await ctx.reply('Créer un évent ?', { reply_markup: new InlineKeyboard().text('➕ Nouvel évent', 'evnew') });
 }
-bot.command('events', (ctx) => showEvents(ctx));
-bot.callbackQuery('m:events', async (ctx) => { await ctx.answerCallbackQuery(); await showEvents(ctx); });
-bot.callbackQuery(/^ev:(.+)$/, async (ctx) => {
+bot.command('events', showEvents);
+bot.callbackQuery(/^ev:(published|draft|cancelled):(.+)$/, async (ctx) => {
   await ctx.answerCallbackQuery();
-  if (ctx.match[1] === 'new') { setFlow(ctx.from.id, { type: 'event', step: 'title', data: {} }); return ctx.reply('Titre de l\u2019évent ?'); }
-  const id = ctx.match[1];
-  const kb = new InlineKeyboard().text('Publié → dépublier', `evt:toggle:${id}`).text('Annuler l\u2019évent', `evt:cancel:${id}`).row().text('✖️ Annuler', 'no');
-  await ctx.reply('Modifier cet évent ?', { ...html, reply_markup: kb });
+  await rpc(S(ctx).sb, 'admin_set_event_status', { _id: ctx.match[2], _status: ctx.match[1] });
+  await ctx.reply('✅ Statut mis à jour.');
 });
-bot.callbackQuery(/^evt:(toggle|cancel):(.+)$/, async (ctx) => {
-  await ctx.answerCallbackQuery();
-  const [action, id] = [ctx.match[1], ctx.match[2]];
-  askConfirm(ctx, `${action === 'toggle' ? 'Basculer la publication' : 'Annuler'} de l\u2019évent #${id}`, 'admin_set_event_status', { _id: id, _action: action }, 'events');
-});
+bot.callbackQuery('evnew', async (ctx) => { await ctx.answerCallbackQuery(); setFlow(ctx.from.id, { type: 'ev_new', step: 'title', data: {} }); await ctx.reply('Titre de l\'évent ?'); });
 
-// ---------- boutique (phase 4) ----------
+// ---------- boutique ----------
 async function showShop(ctx) {
-  const rows = await safeRpc(ctx, 'admin_list_shop', { _limit: 10 }, 'boutique');
-  if (!rows?.length) return ctx.reply('Aucun article.');
-  const kb = new InlineKeyboard();
-  rows.forEach((a) => kb.text(`${esc(a.name)} — ${fmt(a.price)} ${cur(a.currency)}${a.sold_at ? ' (vendu)' : ''}`, `sh:${a.id}`).row());
-  kb.text('➕ Créer un article', 'sh:new').text('◀️ Menu', 'menu');
-  await ctx.reply('<b>🛒 Boutique</b>', { ...html, reply_markup: kb });
+  const rows = await rpc(S(ctx).sb, 'admin_shop_list');
+  const lines = rows.slice(0, 15).map((s) => `${s.status === 'sold' ? '🔴' : s.status === 'withdrawn' ? '⚪' : '🟢'} ${esc(s.name)} — ${fmt(s.price)} ${cur(s.currency)}${s.buyer_pseudo ? ' → ' + esc(s.buyer_pseudo) : ''}`);
+  await ctx.reply(lines.length ? lines.join('\n') : 'Aucun article.', { ...html, reply_markup: new InlineKeyboard().text('➕ Nouvel article', 'shopnew') });
 }
-bot.command('boutique', (ctx) => showShop(ctx));
-bot.callbackQuery('m:shop', async (ctx) => { await ctx.answerCallbackQuery(); await showShop(ctx); });
-bot.callbackQuery('sh:new', async (ctx) => {
+bot.command('boutique', showShop);
+bot.callbackQuery('shopnew', async (ctx) => { await ctx.answerCallbackQuery(); setFlow(ctx.from.id, { type: 'shop_new', step: 'name', data: {} }); await ctx.reply('Nom de l\'article ?'); });
+
+// ---------- menu principal ----------
+bot.callbackQuery(/^m:(.+)$/, async (ctx) => {
   await ctx.answerCallbackQuery();
-  setFlow(ctx.from.id, { type: 'shop', step: 'name', data: {} });
-  await ctx.reply('Nom de l\u2019article ?');
+  const k = ctx.match[1];
+  if (k === 'stats') return showStats(ctx);
+  if (k === 'player') { setFlow(ctx.from.id, { type: 'search' }); return ctx.reply('Nom, pseudo ou numéro à rechercher ?'); }
+  if (k === 'loans') return showLoans(ctx);
+  if (k === 'events') return showEvents(ctx);
+  if (k === 'shop') return showShop(ctx);
 });
 
-// ---------- OWNER (phase 5) ----------
-bot.callbackQuery('m:owner', async (ctx) => {
+// ---------- confirmations finales ----------
+bot.callbackQuery(/^cf:(.+)$/, async (ctx) => {
   await ctx.answerCallbackQuery();
-  if (!has('owner')) return ctx.reply("⚠️ Le dashboard OWNER n'est pas encore actif.");
-  await ctx.reply('<b>👑 OWNER</b>\nFonctions OWNER — en construction (phase 5).', html);
-});
-
-// ---------- alertes automatiques ----------
-const ALERT_FEATURE = { bank_loan_request: 'prets', chat_report: 'events', shop_sale: 'boutique' };
-let alertState = { since: new Date().toISOString(), broken: false };
-try { alertState = JSON.parse(fs.readFileSync(path.join(DATA_DIR, 'alert-state.json'), 'utf8')); } catch {}
-function saveAlertState() { try { fs.writeFileSync(path.join(DATA_DIR, 'alert-state.json'), JSON.stringify(alertState)); } catch {} }
-
-async function pollAlerts() {
-  if (alertState.broken) return;
-  const active = ALERT_TYPES.filter((t) => has(ALERT_FEATURE[t] || t));
-  if (!active.length) return;
-  for (const [tid, s] of sessions) {
-    let rows;
-    try { rows = await rpc(s.sb, 'admin_pending_alerts', { _types: active, _since: alertState.since }); }
-    catch (e) {
-      if (/could not find the function|404|PGRST202/i.test(e.message)) { alertState.broken = true; saveAlertState(); return console.warn('[alertes] fonction absente, arrêt du polling.'); }
-      continue;
-    }
-    if (Array.isArray(rows) && rows.length) {
-      const txt = rows.map((r) => `🔔 <b>${esc(r.type)}</b> — ${esc(r.summary ?? r.details ?? '')} · ${dt(r.created_at)}`).join('\n');
-      await bot.api.sendMessage(tid, txt, html).catch(() => {});
-    }
+  const f = getFlow(ctx.from.id);
+  flows.delete(ctx.from.id);
+  if (!f) return ctx.reply('Session expirée, recommence.');
+  const { sb } = S(ctx);
+  const key = ctx.match[1];
+  if (key === 'bal' && f.type === 'bal') {
+    await rpc(sb, 'admin_adjust_balance', { _user_id: f.data.uid, _currency: f.data.currency, _amount: f.data.amount, _direction: f.data.dir, _reason: f.data.reason, _confirm: true });
+    return ctx.editMessageText('✅ Opération effectuée et inscrite au journal d\'audit.');
   }
-  alertState.since = new Date().toISOString();
-  saveAlertState();
-}
+  if (key === 'st' && f.type === 'status') {
+    await rpc(sb, 'admin_set_account_status', { _user_id: f.data.uid, _status: f.data.status, _reason: f.data.reason });
+    return ctx.editMessageText('✅ Statut du compte mis à jour.');
+  }
+  if ((key === 'evp' || key === 'evd') && f.type === 'ev_new') {
+    await rpc(sb, 'admin_create_event', { _title: f.data.title, _description: f.data.desc, _image_path: null, _starts_at: f.data.iso, _location: f.data.place, _publish: key === 'evp' });
+    return ctx.editMessageText(key === 'evp' ? '✅ Évent publié (les joueurs sont notifiés).' : '✅ Évent enregistré en brouillon.');
+  }
+  if (key === 'shop' && f.type === 'shop_new') {
+    let imagePath = null;
+    if (f.data.fileId) {
+      const file = await ctx.api.getFile(f.data.fileId);
+      const res = await fetch(`https://api.telegram.org/file/bot${TELEGRAM_BOT_TOKEN}/${file.file_path}`);
+      const buf = Buffer.from(await res.arrayBuffer());
+      if (buf.length > 3 * 1024 * 1024) throw new Error('Image trop lourde (3 Mo maximum).');
+      imagePath = `${S(ctx).userId}/${Date.now()}.jpg`;
+      const up = await sb.storage.from('shop').upload(imagePath, buf, { contentType: 'image/jpeg' });
+      if (up.error) throw new Error(up.error.message);
+    }
+    await rpc(sb, 'admin_create_shop_item', { _name: f.data.name, _description: f.data.desc, _image_path: imagePath, _price: f.data.price, _currency: f.data.currency });
+    return ctx.editMessageText('✅ Article créé dans la Guilde marchande.');
+  }
+  if (key === 'ed' && f.type === 'edit') {
+    const d = f.data;
+    await rpc(sb, 'admin_update_player', {
+      _user_id: d.uid,
+      _display_name: d.field === 'name' ? d.value : null,
+      _pseudo: d.field === 'pseudo' ? d.value : null,
+      _class: d.field === 'class' ? d.value : null,
+      _level: d.field === 'level' ? d.value : null,
+      _reason: d.reason,
+    });
+    await ctx.editMessageText('✅ Donnée mise à jour et inscrite au journal d\'audit.');
+    return showPlayer(ctx, d.uid);
+  }
+  if (key === 'pw' && f.type === 'pw') {
+    const pw = await rpc(sb, 'admin_reset_password', { _user_id: f.data.uid, _reason: f.data.reason, _confirm: true });
+    await ctx.editMessageText('✅ Mot de passe réinitialisé : ses sessions ouvertes ont été coupées.');
+    const m = await ctx.reply(`🔑 Mot de passe temporaire :\n<code>${esc(pw)}</code>\n⚠️ Transmets-le au joueur. Ce message sera supprimé dans 90 secondes et le mot de passe ne sera plus affiché.`, html);
+    setTimeout(() => ctx.api.deleteMessage(m.chat.id, m.message_id).catch(() => {}), 90000);
+    return;
+  }
+  return ctx.reply('Confirmation inattendue.');
+});
 
-// ---------- gestion des étapes de création (évent / article) ----------
+// ---------- saisies guidées (texte et photo) ----------
+const parseInt0 = (t) => { const n = Number(String(t).replace(/[\s.,]/g, '')); return Number.isSafeInteger(n) && n > 0 ? n : null; };
+function parseDate(t) {
+  const m = /^(\d{2})\/(\d{2})\/(\d{4})\s+(\d{2}):(\d{2})$/.exec(t.trim());
+  if (!m) return null;
+  const iso = `${m[3]}-${m[2]}-${m[1]}T${m[4]}:${m[5]}:00+01:00`; // heure du Cameroun
+  return Number.isNaN(Date.parse(iso)) ? null : iso;
+}
 bot.on('message:text', async (ctx) => {
-  if (ctx.message.text.startsWith('/')) return;
   const f = getFlow(ctx.from.id);
-  if (!f) return;
   const t = ctx.message.text.trim();
-  const d = f.data;
-
-if (f.type === 'event') {
-    if (f.step === 'title') { d.title = t; f.step = 'description'; f.data = d; setFlow(ctx.from.id, f); return ctx.reply('Description ?'); }
-    if (f.step === 'description') { d.description = t; f.step = 'date'; f.data = d; setFlow(ctx.from.id, f); return ctx.reply('Date (AAAA-MM-JJ HH:MM, heure de Douala) ?'); }
-    if (f.step === 'date') {
-      flows.delete(ctx.from.id);
-      return askConfirm(ctx, `Créer l'évent « ${esc(d.title)} » le ${esc(t)}`, 'admin_create_event', { _title: d.title, _description: d.description, _date: t }, 'events');
+  if (!f) return ctx.reply('Utilise /menu pour commencer.');
+  if (f.type === 'search') { flows.delete(ctx.from.id); return searchPlayers(ctx, t); }
+  if (f.type === 'bal') {
+    if (f.step === 'amount') { const n = parseInt0(t); if (!n) return ctx.reply('Montant invalide : entre un nombre entier positif.'); f.data.amount = n; f.step = 'reason'; setFlow(ctx.from.id, f); return ctx.reply('Motif (obligatoire) ?'); }
+    if (f.step === 'reason') {
+      if (t.length < 3) return ctx.reply('Motif trop court.');
+      f.data.reason = t; setFlow(ctx.from.id, f);
+      return ctx.reply(`<b>Confirmer ?</b>\n${f.data.dir === 'credit' ? 'Créditer' : 'Débiter'} ${fmt(f.data.amount)} ${cur(f.data.currency)}\nMotif : ${esc(t)}`, { ...html, reply_markup: confirmKb('bal') });
     }
   }
-
-if (f.type === 'shop') {
-    if (f.step === 'name') { d.name = t; f.step = 'price'; f.data = d; setFlow(ctx.from.id, f); return ctx.reply('Prix ? (nombre seul)'); }
-    if (f.step === 'price') { const n = Number(t.replace(/[^\d.]/g, '')); if (!Number.isFinite(n) || n <= 0) return ctx.reply('Prix invalide. Réessaie :'); d.price = n; f.step = 'currency'; f.data = d; setFlow(ctx.from.id, f); return ctx.reply('Devise ?', { ...html, reply_markup: new InlineKeyboard().text('Abyss Coins (AC)', 'cur:AC').text('Gems', 'cur:GEM').row().text('✖️ Annuler', 'no') }); }
-    if (f.step === 'done') {
-      flows.delete(ctx.from.id);
-      return askConfirm(ctx, `Créer l'article « ${esc(d.name)} » à ${fmt(d.price)} ${cur(d.currency)}`, 'admin_create_shop_item', { _name: d.name, _price: d.price, _currency: d.currency }, 'boutique');
+  if (f.type === 'status' && f.step === 'reason') {
+    if (t.length < 3) return ctx.reply('Motif trop court.');
+    f.data.reason = t; setFlow(ctx.from.id, f);
+    return ctx.reply(`<b>Confirmer ?</b>\n${f.data.status === 'suspended' ? 'Suspendre' : 'Réactiver'} ce compte.\nMotif : ${esc(t)}`, { ...html, reply_markup: confirmKb('st') });
+  }
+  if (f.type === 'edit') {
+    if (f.step === 'value') {
+      const fld = f.data.field;
+      if (fld === 'level') { const n = Number(t); if (!Number.isInteger(n) || n < 1 || n > 9999) return ctx.reply('Niveau invalide : un entier de 1 à 9999.'); f.data.value = n; }
+      else if (fld === 'name') { if (t.length < 1 || t.length > 60) return ctx.reply('Nom invalide (1 à 60 caractères).'); f.data.value = t; }
+      else if (fld === 'pseudo') { if (t.length < 2 || t.length > 40) return ctx.reply('Pseudo invalide (2 à 40 caractères).'); f.data.value = t; }
+      f.step = 'reason'; setFlow(ctx.from.id, f);
+      return ctx.reply('Motif (obligatoire) ?');
+    }
+    if (f.step === 'reason') {
+      if (t.length < 3) return ctx.reply('Motif trop court.');
+      f.data.reason = t; setFlow(ctx.from.id, f);
+      return ctx.reply(`<b>Confirmer ?</b>\nModifier ${FIELD_LABEL[f.data.field]} : <b>${esc(f.data.value)}</b>\nMotif : ${esc(t)}`, { ...html, reply_markup: confirmKb('ed') });
     }
   }
+  if (f.type === 'pw' && f.step === 'reason') {
+    if (t.length < 3) return ctx.reply('Motif trop court.');
+    f.data.reason = t; setFlow(ctx.from.id, f);
+    return ctx.reply(`<b>Confirmer ?</b>\nGénérer un nouveau mot de passe temporaire pour ce joueur (l'ancien ne fonctionnera plus).\nMotif : ${esc(t)}`, { ...html, reply_markup: confirmKb('pw') });
+  }
+  if (f.type === 'ev_new') {
+    if (f.step === 'title') { f.data.title = t.slice(0, 120); f.step = 'date'; setFlow(ctx.from.id, f); return ctx.reply('Date et heure (heure du Cameroun) au format JJ/MM/AAAA HH:MM ?'); }
+    if (f.step === 'date') { const iso = parseDate(t); if (!iso) return ctx.reply('Format invalide. Exemple : 31/12/2026 20:00'); f.data.iso = iso; f.step = 'place'; setFlow(ctx.from.id, f); return ctx.reply('Lieu ou indication ? (« - » pour aucun)'); }
+    if (f.step === 'place') { f.data.place = t === '-' ? null : t.slice(0, 200); f.step = 'desc'; setFlow(ctx.from.id, f); return ctx.reply('Description ? (« - » pour aucune)'); }
+    if (f.step === 'desc') {
+      f.data.desc = t === '-' ? '' : t.slice(0, 5000); setFlow(ctx.from.id, f);
+      const kb = new InlineKeyboard().text('📣 Publier', 'cf:evp').text('📝 Brouillon', 'cf:evd').row().text('✖️ Annuler', 'no');
+      return ctx.reply(`<b>Nouvel évent</b>\n${esc(f.data.title)}\n${dt(f.data.iso)}${f.data.place ? ' — ' + esc(f.data.place) : ''}\n${esc(f.data.desc)}`, { ...html, reply_markup: kb });
+    }
+  }
+  if (f.type === 'shop_new') {
+    if (f.step === 'name') { f.data.name = t.slice(0, 80); f.step = 'desc'; setFlow(ctx.from.id, f); return ctx.reply('Description ? (« - » pour aucune)'); }
+    if (f.step === 'desc') { f.data.desc = t === '-' ? '' : t.slice(0, 2000); f.step = 'price'; setFlow(ctx.from.id, f); return ctx.reply('Prix (nombre entier) ?'); }
+    if (f.step === 'price') { const n = parseInt0(t); if (!n) return ctx.reply('Prix invalide.'); f.data.price = n; f.step = 'currency'; setFlow(ctx.from.id, f); return ctx.reply('Monnaie ?', { reply_markup: new InlineKeyboard().text('Abyss Coins', 'cur:AC').text('Gems', 'cur:GEM') }); }
+    if (f.step === 'photo' && t === '-') { f.step = 'confirm'; setFlow(ctx.from.id, f); return askShopConfirm(ctx, f); }
+  }
+  return ctx.reply('Réponse non attendue. /annuler pour quitter l\'opération en cours.');
 });
-bot.callbackQuery(/^cur:(AC|GEM)$/, async (ctx) => { // 2e usage : boutique
+bot.on('message:photo', async (ctx) => {
   const f = getFlow(ctx.from.id);
-  if (f?.type === 'shop' && f.step === 'currency') { f.data.currency = ctx.match[1]; f.step = 'done'; setFlow(ctx.from.id, f); await ctx.answerCallbackQuery(); return ctx.reply('Envoie n\u2019importe quoi pour confirmer le récapitulatif (photo : utilise « Modifier » plus tard).'); }
+  if (!f || f.type !== 'shop_new' || f.step !== 'photo') return ctx.reply('Aucune photo attendue.');
+  const sizes = ctx.message.photo;
+  f.data.fileId = sizes[sizes.length - 1].file_id; f.step = 'confirm'; setFlow(ctx.from.id, f);
+  return askShopConfirm(ctx, f);
+});
+function askShopConfirm(ctx, f) {
+  return ctx.reply(`<b>Nouvel article</b>\n${esc(f.data.name)}\n${esc(f.data.desc)}\nPrix : ${fmt(f.data.price)} ${cur(f.data.currency)}\nPhoto : ${f.data.fileId ? 'oui' : 'non'}`, { ...html, reply_markup: confirmKb('shop') });
+}
+
+// ---------- alertes administratives (notifications du compte lié) ----------
+async function pollAlerts() {
+  for (const [tgId, s] of sessions) {
+    try {
+      const file = path.join(DATA_DIR, `sent-${tgId}.json`);
+      const sent = new Set(fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, 'utf8')) : []);
+      const { data, error } = await s.sb.from('notifications').select('id,type,title,message,created_at').eq('user_id', s.userId).eq('read', false).in('type', ALERT_TYPES).order('created_at').limit(20);
+      if (error) throw new Error(error.message);
+      for (const n of data) {
+        if (sent.has(n.id)) continue;
+        await bot.api.sendMessage(tgId, `🔔 <b>${esc(n.title)}</b>\n${esc(n.message)}`, html);
+        sent.add(n.id);
+      }
+      fs.writeFileSync(file, JSON.stringify([...sent].slice(-500)));
+    } catch (e) { console.error(`[alertes ${tgId}]`, e.message); }
+  }
+}
+
+bot.catch(async (err) => {
+  console.error('[erreur]', err.error?.message || err.message);
+  try { await err.ctx.reply(`⚠️ ${err.error?.message || 'Opération impossible.'}`); } catch { /* ignore */ }
 });
 
 // ---------- démarrage ----------
-bot.catch((err) => console.error('[erreur bot]', err));
-
-(async () => {
-  for (const entry of ADMINS) {
-    try { await login(entry); } catch (e) { console.error(e.message); }
-  }
-  if (!sessions.size) { console.error('Aucun administrateur connecté — vérifie ADMINS_JSON et les comptes du site.'); process.exit(1); }
-  console.log(`Bot démarré. Fonctions actives : ${FEATURES.join(', ')}`);
-  setInterval(pollAlerts, POLL_MS);
-  await bot.start({ drop_pending_updates: true });
-})();
+for (const entry of ADMINS) {
+  try { await login(entry); console.log(`Administrateur Telegram ${entry.telegram_id} connecté.`); } catch (e) { console.error(e.message); }
+}
+if (!sessions.size) { console.error('Aucun administrateur connecté : vérifie ADMINS_JSON.'); process.exit(1); }
+setInterval(pollAlerts, POLL_MS);
+process.on('SIGINT', () => process.exit(0));
+bot.start({ onStart: (me) => console.log(`Bot @${me.username} démarré.`) });
